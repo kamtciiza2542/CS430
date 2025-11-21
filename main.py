@@ -1,3 +1,4 @@
+from mailbox import mbox
 from tkinter import *
 import sqlite3
 from tkinter import messagebox, Menu
@@ -33,7 +34,7 @@ def bar_home(user):
     
     if user[7] == "admin" :
         menu_bar = Menu(root, tearoff=0)
-        menu_bar.add_command(label='dashboard', command=lambda: order(user))
+        menu_bar.add_command(label='dashboard', command=lambda: dashboard(user))  # <- แก้ตรงนี้
         menu_bar.add_command(label='books', command=lambda: stock(user))
         menu_bar.add_command(label='catagory', command=lambda: profile(user))
         menu_bar.add_command(label='shelves', command=lambda: profile(user))
@@ -45,7 +46,7 @@ def bar_home(user):
     elif user[7] == "librarian" :
         menu_bar = Menu(root, tearoff=0)
         borrow_menu = Menu(menu_bar, tearoff=0)
-        menu_bar.add_command(label='dashboard', command=lambda: order(user))
+        menu_bar.add_command(label='dashboard', command=lambda: dashboard(user))  # <- แก้ตรงนี้
         borrow_menu.add_command(label='borrowing', command=lambda: stock(user)) 
         menu_bar.add_cascade(label='borrow', menu=borrow_menu)
         menu_bar.add_command(label='history', command=lambda: stock(user))
@@ -113,17 +114,380 @@ def login():
     button_login.grid(row=0,column=0, ipadx=50, ipady=5)
         
 
+# ...existing code...
+# ...existing code...
 def dashboard(user):
+    """
+    Dashboard สรุปการยืมหนังสือสำหรับบรรณารักษ์
+    ใช้ตาราง: borrowings, books, category, student, user
+    """
+    # พยายาม import matplotlib ถ้าไม่มีให้ข้ามกราฟไป
+    try:
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import matplotlib
+        import matplotlib.pyplot as plt
+        # ฟอนต์ไทย (Windows มี Tahoma อยู่แล้ว)
+        matplotlib.rcParams['font.family'] = 'Tahoma'
+    except Exception:
+        FigureCanvasTkAgg = None
+        plt = None
+
+    # ล้างหน้าจอเก่าออกจาก fm_main
+    for w in fm_main.winfo_children():
+        w.destroy()
+
+    # เฟรมหลักของหน้า dashboard
     fm = Frame(fm_main, bg=cl_white)
     fm.grid(row=0, column=0, sticky=NSEW)
-    for widget in fm.winfo_children():
-        widget.destroy()
-        
-    fm.grid_rowconfigure(0, weight=0) # แถว Search ไม่ต้องขยาย
-    fm.grid_rowconfigure(1, weight=1) # แถวตาราง ขยายเต็มที่
-    fm.grid_rowconfigure(2, weight=0) # แถวปุ่ม ไม่ต้องขยาย
+    fm.grid_rowconfigure(0, weight=0)  # title
+    fm.grid_rowconfigure(1, weight=0)  # KPI cards
+    fm.grid_rowconfigure(2, weight=1)  # content (กราฟ + รายการ)
     fm.grid_columnconfigure(0, weight=1)
+
+    # เมนูด้านบน
     bar_home(user)
+
+    # ฟอนต์ที่ใช้เฉพาะในหน้านี้
+    card_title_font = ("Tahoma", 11, "bold")     # หัวข้อการ์ด / หัวข้อ box
+    card_value_font = ("Tahoma", 16, "bold")     # ตัวเลขใหญ่
+    card_sub_font   = ("Tahoma", 9)              # คำอธิบายย่อย
+
+    # หัวข้อใหญ่
+    Label(
+        fm,
+        text="Dashboard",
+        bg=cl_white,
+        fg="black",
+        font=font_h3_bold
+    ).grid(row=0, column=0, sticky=W, padx=spacing_comp, pady=(8, 0))
+
+    #  ฟังก์ชันดึงข้อมูลจาก DB 
+    def safe_query(sql, params=()):
+        try:
+            conn_q, cur_q = db_connection()
+            cur_q.execute(sql, params)
+            rows = cur_q.fetchall()
+            conn_q.close()
+            return rows
+        except Exception as e:
+            print("DB query error:", e, "| SQL:", sql)
+            return []
+
+
+    #   ดึงสถิติจากฐานข้อมูล
+
+    # 1) หมวดหมู่ที่ถูกยืมเยอะที่สุด
+    top_cat_name = "-"
+    top_cat_total = 0
+    r = safe_query("""
+        SELECT c.ctgName, COUNT(*) AS total
+        FROM borrowings b
+        JOIN books bk ON b.bookID = bk.bookID
+        JOIN category c ON bk.ctgID = c.ctgID
+        GROUP BY c.ctgID, c.ctgName
+        ORDER BY total DESC
+        LIMIT 1;
+    """)
+    if r:
+        top_cat_name, top_cat_total = r[0]
+
+    # 2) จำนวนคนที่เคยยืม
+    r = safe_query("SELECT COUNT(DISTINCT stdID) FROM borrowings;")
+    borrower_count = r[0][0] if r and r[0][0] is not None else 0
+
+    # 3) จำนวนครั้งที่ยืมทั้งหมด
+    r = safe_query("SELECT COUNT(*) FROM borrowings;")
+    total_borrow_count = r[0][0] if r and r[0][0] is not None else 0
+
+    # 4) ยอดยืมเดือนปัจจุบัน
+    r = safe_query("""
+        SELECT COUNT(*)
+        FROM borrowings
+        WHERE strftime('%Y-%m', borrowDate) = strftime('%Y-%m', 'now');
+    """)
+    borrow_this_month = r[0][0] if r and r[0][0] is not None else 0
+
+    # 5) จำนวนหนังสือทั้งหมด
+    r = safe_query("SELECT COUNT(*) FROM books;")
+    total_books = r[0][0] if r and r[0][0] is not None else 0
+
+    # 6) จำนวนหมวดหมู่
+    r = safe_query("SELECT COUNT(*) FROM category;")
+    total_categories = r[0][0] if r and r[0][0] is not None else 0
+
+    # 7) จำนวนนักศึกษา
+    r = safe_query("SELECT COUNT(*) FROM student;")
+    total_students = r[0][0] if r and r[0][0] is not None else 0
+
+
+    # ยอดยืมรายเดือน (ไว้ทำกราฟ)
+    monthly_rows = safe_query("""
+        SELECT strftime('%Y-%m', borrowDate) AS mon,
+               COUNT(*) AS total
+        FROM borrowings
+        GROUP BY mon
+        ORDER BY mon;
+    """)
+    monthly_rows = [row for row in monthly_rows if row[0] is not None]
+
+    # Top 5 หนังสือที่ถูกยืมมากที่สุด
+    top5_books = safe_query("""
+        SELECT bk.title, COUNT(*) AS total
+        FROM borrowings b
+        JOIN books bk ON b.bookID = bk.bookID
+        GROUP BY bk.bookID, bk.title
+        ORDER BY total DESC
+        LIMIT 5;
+    """)
+
+    # จำนวนหนังสือในแต่ละหมวดหมู่
+    category_book_counts = safe_query("""
+        SELECT c.ctgName, COUNT(b.bookID) AS total
+        FROM category c
+        LEFT JOIN books b ON c.ctgID = b.ctgID
+        GROUP BY c.ctgID, c.ctgName
+        ORDER BY total DESC;
+    """)
+
+    #   แถวการ์ด KPI ด้านบน (2 แถว × 4 ใบ)
+    
+    kpi = Frame(fm, bg=cl_white)
+    kpi.grid(row=1, column=0, sticky=EW,
+             padx=spacing_comp, pady=(spacing_comp, 0))
+    for c in range(4):
+        kpi.columnconfigure(c, weight=1)
+
+    def kpi_card(parent, row, col, title, value, subtitle=""):
+        box = Frame(parent, bg=cl_white, bd=1, relief=SOLID, padx=14, pady=10)
+    
+        # ถ้าเป็นคอลัมน์แรก (ซ้ายสุด) ไม่ต้องมี padding ด้านซ้าย
+        # เพื่อให้ขอบซ้ายของการ์ดตรงกับกราฟด้านล่าง
+        if col == 0:
+            box.grid(row=row, column=col, padx=(0, 8), pady=6, sticky="nsew")
+        else:
+            box.grid(row=row, column=col, padx=8, pady=6, sticky="nsew")
+    
+        Label(
+            box,
+            text=title,
+            bg=cl_white,
+            fg="black",
+            font=card_title_font
+        ).pack(anchor=W)
+    
+        Label(
+            box,
+            text=str(value),
+            bg=cl_white,
+            fg="black",
+            font=card_value_font
+        ).pack(anchor=W, pady=(2, 0))
+    
+        if subtitle:
+            Label(
+                box,
+                text=subtitle,
+                bg=cl_white,
+                fg=cl_gray,
+                font=card_sub_font
+            ).pack(anchor=W, pady=(2, 0))
+
+    # แถวที่ 1
+    kpi_card(
+        kpi, 0, 0,
+        "หมวดหมู่ที่ยืมเยอะที่สุด",
+        top_cat_name,
+        f"{top_cat_total} ครั้ง"
+    )
+    kpi_card(
+        kpi, 0, 1,
+        "จำนวนผู้ยืม",
+        borrower_count,
+        "คนที่เคยยืมหนังสือ"
+    )
+    kpi_card(
+        kpi, 0, 2,
+        "จำนวนครั้งที่ยืมทั้งหมด",
+        total_borrow_count,
+        "ตั้งแต่เริ่มใช้ระบบ"
+    )
+    kpi_card(
+        kpi, 0, 3,
+        "ยอดยืมเดือนนี้",
+        borrow_this_month,
+        "ครั้งในเดือนปัจจุบัน"
+    )
+
+    # แถวที่ 2
+    kpi_card(
+        kpi, 1, 0,
+        "จำนวนหนังสือทั้งหมด",
+        total_books,
+        "เล่มในระบบ"
+    )
+    kpi_card(
+        kpi, 1, 1,
+        "จำนวนหมวดหมู่",
+        total_categories,
+        "หมวดหมู่"
+    )
+    kpi_card(
+        kpi, 1, 2,
+        "จำนวนนักศึกษา",
+        total_students,
+        "คนในฐานข้อมูล"
+    )
+      
+    #   พื้นที่หลักด้านล่าง (กราฟ + รายการ)
+
+    content = Frame(fm, bg=cl_white)
+    content.grid(row=2, column=0, sticky=NSEW,
+                 padx=spacing_comp, pady=spacing_comp)
+    content.columnconfigure(0, weight=3)  # ซ้าย
+    content.columnconfigure(1, weight=2)  # ขวา
+    content.rowconfigure(0, weight=1)
+
+    # ด้านซ้าย : กราฟ + Top 5 
+    left = Frame(content, bg=cl_white)
+    left.grid(row=0, column=0, sticky=NSEW, padx=(0, 8))
+    left.rowconfigure(0, weight=2)  # กราฟ
+    left.rowconfigure(1, weight=0)  # Top 5
+    left.columnconfigure(0, weight=1)
+
+    # กราฟ
+    chart_card = Frame(left, bg=cl_white, bd=1, relief=SOLID, padx=10, pady=10)
+    chart_card.grid(row=0, column=0, sticky=NSEW)
+    Label(
+        chart_card,
+        text="ยอดยืมรายเดือน (3 เดือนล่าสุด)",
+        bg=cl_white,
+        fg="black",
+        font=card_title_font
+    ).pack(anchor=W)
+
+    # เดือนที่เป็นภาษาไทย
+    thai_months = {
+        "01": "ม.ค.", "02": "ก.พ.", "03": "มี.ค.", "04": "เม.ย.",
+        "05": "พ.ค.", "06": "มิ.ย.", "07": "ก.ค.", "08": "ส.ค.",
+        "09": "ก.ย.", "10": "ต.ค.", "11": "พ.ย.", "12": "ธ.ค."
+    }
+
+    if monthly_rows and plt and FigureCanvasTkAgg:
+        # เอาแค่ 3 เดือนล่าสุด
+        monthly_rows_sorted = sorted(monthly_rows, key=lambda r: r[0])
+        last_rows = monthly_rows_sorted[-3:]
+
+        month_labels = []
+        totals = []
+        for ym, total in last_rows:
+            year, mon = ym.split("-")
+            label_th = f"{thai_months.get(mon, mon)} {year}"
+            month_labels.append(label_th)
+            totals.append(total)
+
+        x = list(range(len(month_labels)))
+
+        fig, ax = plt.subplots(figsize=(5.5, 2.4))
+
+        # ----- แท่ง (bar) ด้านหลัง -----
+        bar_width = 0.6
+        ax.bar(
+            x,
+            totals,
+            width=bar_width,
+            color="#e1efff",          
+            edgecolor="#c0d4f5",
+            linewidth=1
+        )
+
+        
+        ax.plot(
+            x,
+            totals,
+            color="#ff6b6b",          
+            marker="o",
+            markersize=5,
+            linewidth=2
+        )
+
+        # เส้นgridแกน Y ช่องๆ
+        ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+
+        #ปิดขอบบนขวา
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(month_labels, rotation=45)
+        ax.set_xlabel("เดือน")
+        ax.set_ylabel("จำนวนครั้งที่ยืม")
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, master=chart_card)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=BOTH, expand=True)
+    else:
+        Label(chart_card, text="No monthly data",
+              bg=cl_white, fg="black").pack(anchor=W, pady=8)
+
+    # Top 5 หนังสือ
+    top_box = Frame(left, bg=cl_white, bd=1, relief=SOLID, padx=10, pady=10)
+    top_box.grid(row=1, column=0, sticky=EW, pady=(8, 0))
+    Label(
+        top_box,
+        text="Top 5 หนังสือที่ถูกยืมมากที่สุด",
+        bg=cl_white,
+        fg="black",
+        font=card_title_font
+    ).pack(anchor=W)
+
+    if top5_books:
+        for title, total in top5_books:
+            Label(
+                top_box,
+                text=f"{title} — {total} ครั้ง",
+                bg=cl_white,
+                anchor="w",
+                font=card_sub_font
+            ).pack(fill="x")
+    else:
+        Label(top_box, text="No data", bg=cl_white,
+              font=card_sub_font).pack(anchor=W, pady=4)
+
+    #  ด้านขวา  จำนวนหนังสือในแต่ละหมวด 
+    right = Frame(content, bg=cl_white)
+    right.grid(row=0, column=1, sticky=NSEW, padx=(8, 0))
+    right.rowconfigure(0, weight=0)
+    right.columnconfigure(0, weight=1)
+
+    category_card = Frame(right, bg=cl_white, bd=1, relief=SOLID, padx=10, pady=10)
+    category_card.grid(row=0, column=0, sticky=NSEW)
+    Label(
+        category_card,
+        text="จำนวนหนังสือในแต่ละหมวดหมู่",
+        bg=cl_white,
+        fg="black",
+        font=card_title_font
+    ).pack(anchor=W)
+
+    if category_book_counts:
+        for name, total in category_book_counts:
+            Label(
+                category_card,
+                text=f"{name} — {total} เล่ม",
+                bg=cl_white,
+                anchor="w",
+                font=card_sub_font
+            ).pack(fill="x")
+    else:
+        Label(
+            category_card,
+            text="No category data",
+            bg=cl_white,
+            font=card_sub_font
+        ).pack(anchor=W, pady=4)
+
 
 def books(user):
     fm = Frame(fm_main, bg=cl_white)
@@ -785,13 +1149,12 @@ def login_click(username,password) :
         else :
             # check username and password 
             sql = "select * from user where username = ? and password = ? "
-            cursor.execute(sql,[username, password])   #case2
+            cursor.execute(sql,[username, password])
             user = cursor.fetchone()
             if user :
                 messagebox.showinfo("Admin:","Login Successfully")
                 print(user)
-                dashboard()
-                
+                dashboard(user)   # <-- ส่ง user เข้าฟังก์ชัน
             else :
                 messagebox.showwarning("Admin:","Username not found\n Please register before Login")
                 password_login_entry.select_range(0,END)
